@@ -4,6 +4,7 @@ import { z } from 'zod';
 import { getDb, setSetting } from '../db/index.js';
 import { decrypt, maskKey } from '../lib/crypto.js';
 import { deleteUnusedCustomEndpointKey } from '../lib/custom-provider-cleanup.js';
+import { assessProviderUrl } from '../lib/url-guard.js';
 import { resolveCustomEndpointKey } from '../services/custom-endpoint.js';
 import {
   listEmbeddingModels,
@@ -91,6 +92,15 @@ embeddingsRouter.post('/custom', async (req: Request, res: Response) => {
 
   const db = getDb();
   const baseUrl = parsed.data.baseUrl.trim().replace(/\/+$/, '');
+  // SSRF guard (#440): same save-time assessment the keys routes apply to
+  // custom base URLs, run before the live dimension probe fires. The probe
+  // itself is also request-time guarded by proxyFetch, but a blocked URL
+  // should be rejected here rather than probed and persisted.
+  const verdict = await assessProviderUrl(baseUrl);
+  if (!verdict.allowed) {
+    res.status(400).json({ error: { message: `baseUrl rejected: ${verdict.reason}` } });
+    return;
+  }
   const modelId = parsed.data.model.trim();
   if (!modelId) {
     res.status(400).json({ error: { message: 'model is required' } });

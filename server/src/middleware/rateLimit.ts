@@ -31,6 +31,29 @@ function parseLimit(): number {
   return Math.floor(n);
 }
 
+/**
+ * The address that owns a rate-limit bucket.
+ *
+ * Express's `req.ip` honours the configured trust-proxy chain, but with
+ * `TRUST_PROXY=true` (trust every hop) it resolves to the LEFTMOST
+ * X-Forwarded-For entry — a header any direct caller can forge, which would
+ * let one attacker launder unlimited distinct buckets and walk straight
+ * through every per-IP cap. The socket peer is the one address a caller
+ * cannot spoof, so the trust-all mode keys buckets on it. Behind a real
+ * reverse proxy that means every caller shares the proxy's bucket and the
+ * limit caps total attempts rather than per-client — exactly the
+ * brute-force protection these limiters exist to provide. Hop-count and
+ * address-list trust settings keep the precise first-untrusted address from
+ * `req.ip`.
+ */
+function rateLimitClientIp(req: Request): string {
+  const fallback = req.socket.remoteAddress ?? 'unknown';
+  const ip = req.app.get('trust proxy') === true ? fallback : (req.ip ?? fallback);
+  // Normalize IPv4-mapped IPv6 ("::ffff:192.168.0.5" -> "192.168.0.5") so the
+  // two spellings of one address share a bucket.
+  return ip.startsWith('::ffff:') ? ip.slice(7) : ip;
+}
+
 export function createProxyRateLimiter(rpmLimit?: number) {
   const limit = rpmLimit !== undefined ? Math.floor(Math.max(0, rpmLimit)) : parseLimit();
   const windows = new Map<string, WindowState>();
@@ -42,7 +65,7 @@ export function createProxyRateLimiter(rpmLimit?: number) {
     }
 
     const now = Date.now();
-    const ip = req.ip ?? req.socket.remoteAddress ?? 'unknown';
+    const ip = rateLimitClientIp(req);
 
     let state = windows.get(ip);
     if (!state || now >= state.resetAt) {
@@ -109,7 +132,7 @@ export function createAdminRateLimiter(rpm?: number) {
     }
 
     const now = Date.now();
-    const ip = req.ip ?? req.socket.remoteAddress ?? 'unknown';
+    const ip = rateLimitClientIp(req);
 
     let state = windows.get(ip);
     if (!state || now >= state.resetAt) {

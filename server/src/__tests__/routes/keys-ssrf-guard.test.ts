@@ -72,6 +72,34 @@ describe('POST /api/keys/custom SSRF guard (#440)', () => {
     });
     expect(res.status).toBe(201);
   });
+
+  it('rejects a metadata base URL on POST /api/media/custom', async () => {
+    const res = await post(app, '/api/media/custom', {
+      baseUrl: 'http://169.254.169.254/latest/meta-data',
+      model: 'whisper-1',
+      modality: 'transcription',
+    });
+    expect(res.status).toBe(400);
+    expect(res.body.error.message).toMatch(/metadata/);
+  });
+
+  it('rejects a metadata base URL on POST /api/embeddings/custom', async () => {
+    const res = await post(app, '/api/embeddings/custom', {
+      baseUrl: 'http://169.254.169.254/latest/meta-data',
+      model: 'text-embedding-3-small',
+    });
+    expect(res.status).toBe(400);
+    expect(res.body.error.message).toMatch(/metadata/);
+  });
+
+  it('still accepts a loopback base URL on POST /api/media/custom', async () => {
+    const res = await post(app, '/api/media/custom', {
+      baseUrl: 'http://127.0.0.1:11434/v1',
+      model: 'llava',
+      modality: 'image',
+    });
+    expect(res.status).toBe(201);
+  });
 });
 
 describe('proxyFetch request-time SSRF guard (#440)', () => {

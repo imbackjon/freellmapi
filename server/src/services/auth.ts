@@ -50,9 +50,26 @@ export function verifyCredentials(email: string, password: string): SessionUser 
   const db = getDb();
   const row = db.prepare('SELECT id, email, password_hash FROM users WHERE email = ?')
     .get(normalizeEmail(email)) as { id: number; email: string; password_hash: string } | undefined;
-  if (!row) return null;
+  if (!row) {
+    // Burn the same scrypt cost as a real verification so the response timing
+    // does not reveal whether the account exists (an early return here made
+    // the login endpoint an account-existence oracle).
+    verifyPassword(password, getDummyPasswordHash());
+    return null;
+  }
   if (!verifyPassword(password, row.password_hash)) return null;
   return { userId: row.id, email: row.email };
+}
+
+// A well-formed scrypt hash used to equalize the cost of the unknown-email
+// login path. Generated lazily so a process that never sees a failed login
+// pays nothing.
+let dummyPasswordHash: string | null = null;
+function getDummyPasswordHash(): string {
+  if (!dummyPasswordHash) {
+    dummyPasswordHash = hashPassword(crypto.randomBytes(16).toString('hex'));
+  }
+  return dummyPasswordHash;
 }
 
 /** Mint a session and return the raw token (only the hash is persisted). */
