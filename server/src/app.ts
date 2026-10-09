@@ -38,6 +38,11 @@ import { createProxyRateLimiter, createAdminRateLimiter } from './middleware/rat
 // Password-guess ceiling for GET /api/keys/export. Deliberately low: a real
 // user exports keys occasionally, never ten times a minute.
 const EXPORT_RATE_LIMIT_RPM = 10;
+// Wrong reset codes are retryable for the code's 15-minute TTL, so the
+// /api/auth/reset-password form gets its own tight per-IP cap like the export
+// endpoint. The code itself has ~50 bits of entropy and is compared in
+// constant time, so this is defense-in-depth, not the primary control.
+const RESET_PASSWORD_RATE_LIMIT_RPM = 5;
 import { errorHandler } from './middleware/errorHandler.js';
 import { clientContextMiddleware } from './lib/client-context.js';
 import type { Config } from './lib/config.js';
@@ -227,6 +232,9 @@ export function createApp(config?: Config) {
   // for the limiter as the one /api path it did not cover. It still sits below
   // the Ollama /api/* mount above, which carries its own proxy limiter.
   const adminRateLimiter = createAdminRateLimiter();
+  // Tighter per-IP cap for the reset-code form, mounted ahead of the broad
+  // /api limiter so rejected attempts never draw down the shared budget.
+  app.use('/api/auth/reset-password', createAdminRateLimiter(RESET_PASSWORD_RATE_LIMIT_RPM));
   app.use('/api', adminRateLimiter);
 
   // Dashboard auth (#35): /api/auth/{status,setup,login} bootstrap without a

@@ -66,4 +66,26 @@ describe('Proxy per-IP rate limiting (#35 item #6)', () => {
       expect(res.status).not.toBe(429);
     }
   });
+
+  it('keys the bucket on the socket peer, not a forged X-Forwarded-For, under TRUST_PROXY=true', async () => {
+    // With `trust proxy` set to trust-everything, Express resolves req.ip to
+    // the leftmost X-Forwarded-For entry — a header a direct caller can forge.
+    // Spoofing a fresh address per request must not launder a fresh bucket:
+    // all of them share the socket peer, so the cap still trips.
+    process.env.PROXY_RATE_LIMIT_RPM = '3';
+    process.env.TRUST_PROXY = 'true';
+    try {
+      const app = createApp();
+
+      for (let i = 0; i < 3; i++) {
+        const res = await request(app, { 'X-Forwarded-For': `10.0.0.${i + 1}` });
+        expect(res.status).not.toBe(429);
+      }
+      const limited = await request(app, { 'X-Forwarded-For': '10.0.0.99' });
+      expect(limited.status).toBe(429);
+      expect(limited.body.error.type).toBe('rate_limit_error');
+    } finally {
+      delete process.env.TRUST_PROXY;
+    }
+  });
 });

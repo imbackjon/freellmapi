@@ -4,6 +4,7 @@ import { z } from 'zod';
 import { getDb } from '../db/index.js';
 import { maskKey } from '../lib/crypto.js';
 import { deleteUnusedCustomEndpointKey } from '../lib/custom-provider-cleanup.js';
+import { assessProviderUrl } from '../lib/url-guard.js';
 import { resolveCustomEndpointKey } from '../services/custom-endpoint.js';
 import { registerCustomMediaModel } from '../services/custom-media-register.js';
 import { listAllMediaModels } from '../services/media.js';
@@ -112,7 +113,7 @@ const customMediaSchema = z.object({
   quotaLabel: z.string().optional(),
 });
 
-mediaRouter.post('/custom', (req: Request, res: Response) => {
+mediaRouter.post('/custom', async (req: Request, res: Response) => {
   const parsed = customMediaSchema.safeParse(req.body);
   if (!parsed.success) {
     res.status(400).json({ error: { message: parsed.error.errors.map(e => e.message).join(', ') } });
@@ -121,6 +122,15 @@ mediaRouter.post('/custom', (req: Request, res: Response) => {
 
   const db = getDb();
   const baseUrl = parsed.data.baseUrl.trim().replace(/\/+$/, '');
+  // SSRF guard (#440): the same save-time assessment the keys routes apply to
+  // custom base URLs. The request-time check in proxyFetch would also block a
+  // metadata/link-local target, but rejecting here keeps the failure immediate
+  // and stops a blocked URL from ever being persisted.
+  const verdict = await assessProviderUrl(baseUrl);
+  if (!verdict.allowed) {
+    res.status(400).json({ error: { message: `baseUrl rejected: ${verdict.reason}` } });
+    return;
+  }
   const modelId = parsed.data.model.trim();
   if (!modelId) {
     res.status(400).json({ error: { message: 'model is required' } });
