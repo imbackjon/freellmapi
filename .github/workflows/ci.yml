@@ -6,10 +6,17 @@ on:
   pull_request:
     branches: [main]
 
+# Iteration pushes several commits in a row; only the newest result matters,
+# so cancel any run still in progress for the same branch/PR.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
-    name: Test & build (Node ${{ matrix.node-version }})
+    name: Test (Node ${{ matrix.node-version }}, ${{ matrix.shard }})
     runs-on: ubuntu-24.04
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -17,6 +24,17 @@ jobs:
         # 20 is the CI baseline that has historically caught crashes newer local
         # Node versions hid; 22 is the current LTS most contributors run.
         node-version: ['20', '22']
+        # The server suite ran ~3.5 min wall-clock serially (vitest runs with
+        # --fileParallelism=false: the tests share a process-local DB singleton,
+        # so files may not run concurrently). Splitting it by directory across
+        # two jobs halves wall time while keeping every job's runtime conditions
+        # identical to the old single job — one vitest process per 4-core
+        # runner, so the timing-sensitive compression budget test is unaffected.
+        # Measured split: http ~1m51, core ~1m40. New test files follow their
+        # directory; if a directory outgrows its shard, re-balance the lists.
+        shard:
+          - http
+          - core
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -28,17 +46,60 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Run repo-level tests
+        run: npm run test:bootstrap && npm run test:hooks
+
+      - name: Run CLI tests
+        run: npm run test -w cli
+
+      - name: Run client tests
+        run: npm run test -w client
+
+      # A fast-fail gate on the migration suite before the long server run;
+      # the same tests also run inside the core shard below.
       - name: Check migration round trip
+        if: matrix.shard == 'core'
         run: npm run test:migrations
 
       # COVERAGE makes the server suite collect coverage inside this run rather
       # than running the whole suite a second time. Only the Node 22 leg sets
       # it, so the Node 20 leg keeps uninstrumented timings. Reporting only,
-      # there are no thresholds and coverage never fails the build.
-      - name: Run tests
+      # there are no thresholds and coverage never fails the build. Each shard
+      # reports coverage for the modules its tests import, so the two Node 22
+      # shards together cover the package.
+      - name: Run server tests (${{ matrix.shard }})
         env:
           COVERAGE: ${{ matrix.node-version == '22' && '1' || '' }}
-        run: npm test
+          SHARD: ${{ matrix.shard }}
+        run: |
+          if [ "$SHARD" = "http" ]; then
+            npm run test -w server -- src/__tests__/routes
+          else
+            npm run test -w server -- \
+              src/__tests__/integration \
+              src/__tests__/providers \
+              src/__tests__/services \
+              src/__tests__/db \
+              src/__tests__/lib \
+              src/__tests__/scripts
+          fi
+
+  lint-build:
+    name: Lint & build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    # Toolchain checks: single Node 22 job instead of duplicating lint/build on
+    # every test-matrix leg. Runs in parallel with the test shards.
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
 
       # server + cli only; the client has its own backlog of ESLint violations
       # and is brought in under a separate change.
